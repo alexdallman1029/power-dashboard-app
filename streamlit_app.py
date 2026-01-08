@@ -87,9 +87,9 @@ def query_df(sql: str, params: dict | None = None) -> pd.DataFrame:
         return pd.read_sql_query(text(sql), conn, params=params)
     
 #tests
-st.write("DB:", engine.dialect.name)
-st.write("Max day:", query_df("select max(day) as d from usage_daily").iloc[0]["d"])
-st.write("Last ingest:", query_df("select value from kv_store where key='last_ingested_at_utc'").iloc[0]["value"])
+#st.write("DB:", engine.dialect.name)
+#st.write("Max day:", query_df("select max(day) as d from usage_daily").iloc[0]["d"])
+#st.write("Last ingest:", query_df("select value from kv_store where key='last_ingested_at_utc'").iloc[0]["value"])
 
 
 def first_of_month(d: dt.date) -> dt.date:
