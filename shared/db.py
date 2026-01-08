@@ -28,8 +28,12 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 def get_engine() -> Engine:
     db_url = os.getenv("DATABASE_URL", "sqlite:///data/energy.sqlite")
-    return create_engine(db_url, future=True)
 
+    # Normalize old scheme some hosts still use
+    if db_url.startswith("postgres://"):
+        db_url = db_url.replace("postgres://", "postgresql://", 1)
+
+    return create_engine(db_url, future=True, pool_pre_ping=True)
 
 # ---------- Schema ----------
 
