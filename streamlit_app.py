@@ -10,8 +10,6 @@ from zoneinfo import ZoneInfo
 from PIL import Image
 
 from billing.tenant_charges import calculate_tenant_charges
-
-
 #---------------------------
 # Title and Header
 #---------------------------
@@ -19,7 +17,7 @@ logo = Image.open("assets/fishdog-24.png")
 st.set_page_config(page_title="FishDog Farm Dashboard", layout="wide")
 
 #Center logo and title
-left, mid, right = st.columns([3, 2, 3])
+left, mid, right = st.columns([3, 3, 3])
 
 with mid:
     st.image(logo, width=350)
@@ -130,6 +128,9 @@ aliases = query_df(
 device_name_map = dict(
     zip(aliases["device_gid"], aliases["display_name"])
 )
+
+device_name_map = {int(k): v for k, v in device_name_map.items()}
+
 
 # -------- Get last time data were updated --------
 last_ingest = query_df(

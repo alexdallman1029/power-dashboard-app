@@ -9,7 +9,7 @@ from typing import List, Dict, Any, Optional
 import pyemvue
 from pyemvue.enums import Scale, Unit
 
-from shared.db import get_engine, init_db, upsert_usage_daily, set_kv
+from shared.db import get_engine, init_db, upsert_usage_daily, set_kv, upsert_device_aliases
 
 
 # ------------------------
@@ -241,6 +241,24 @@ def main(days_back: int = 40, channel_mode: str = "main_only") -> int:
     vue.login(username=username, password=password)
 
     devices = vue.get_devices()
+
+    alias_rows = []
+    for d in devices:
+        dg = getattr(d, "device_gid", None)
+        if dg is None:
+            continue
+
+        name = getattr(d, "device_name", None) or getattr(d, "name", None)
+        if not name:
+            continue
+
+        alias_rows.append(
+            {"device_gid": int(dg), "display_name": str(name).strip()}
+        )
+
+    upsert_device_aliases(engine, alias_rows)
+
+
     channels = choose_channels(devices, mode=channel_mode)
 
     if not channels:
