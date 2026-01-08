@@ -2,7 +2,9 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import datetime as dt
-import sqlite3
+#import sqlite3
+from sqlalchemy import text
+from shared.db import get_engine
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from PIL import Image
@@ -27,13 +29,20 @@ with mid:
 # Data
 #---------------------------
 
-DB_PATH = "data/energy.sqlite"
+#only used w/ sqlite
+#DB_PATH = "data/energy.sqlite"
 
 FEATURED_GIDS = [417380, 422491, 432058, 432079]
 
 RV_SITES_GID = 417380
 POLE_BARN_MAIN_GID = 422491
 POLE_BARN_SUB_GID = 432058
+
+
+RV_SITES = 417380
+GROW_BARN = 432079
+POLE_BARN_MAIN = 422491
+POLE_BARN_SUB = 432058
 
 #---------------------------
 # Color Palette
@@ -61,19 +70,26 @@ px.defaults.color_discrete_sequence = [
 # Helpers
 # -------------------------
 
-@st.cache_data(ttl=60)
-def load_table(sql: str) -> pd.DataFrame:
-    conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query(sql, conn)
-    conn.close()
-    return df
+#only used w/ sqlite
+#@st.cache_data(ttl=60)
+#def load_table(sql: str) -> pd.DataFrame:
+    #conn = sqlite3.connect(DB_PATH)
+    #df = pd.read_sql_query(sql, conn)
+    #conn.close()
+    #return df
+
+engine = get_engine()
 
 @st.cache_data(ttl=60)
-def query_df(sql: str, params: tuple = ()) -> pd.DataFrame:
-    conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query(sql, conn, params=params)
-    conn.close()
-    return df
+def query_df(sql: str, params: dict | None = None) -> pd.DataFrame:
+    params = params or {}
+    with engine.begin() as conn:
+        return pd.read_sql_query(text(sql), conn, params=params)
+    
+#tests
+st.write("DB:", engine.dialect.name)
+st.write("Max day:", query_df("select max(day) as d from usage_daily").iloc[0]["d"])
+st.write("Last ingest:", query_df("select value from kv_store where key='last_ingested_at_utc'").iloc[0]["value"])
 
 
 def first_of_month(d: dt.date) -> dt.date:
@@ -146,14 +162,14 @@ available_months = query_df(
     """
     select distinct
       case
-        when cast(strftime('%d', day) as integer) >= ?
-        then strftime('%Y-%m', date(day, '+1 month'))
-        else strftime('%Y-%m', day)
+        when extract(day from day) >= :billing_day
+        then to_char(day + interval '1 month', 'YYYY-MM')
+        else to_char(day, 'YYYY-MM')
       end as ym
     from usage_daily
     order by ym desc
     """,
-    params=(BILLING_DAY,),
+    params={"billing_day": BILLING_DAY},
 )
 
 raw_months = sorted(available_months["ym"].tolist(), reverse=True)
@@ -193,11 +209,12 @@ global_range = query_df(
       min(day) as min_day,
       max(day) as max_day
     from usage_daily
-    where day >= ?
-      and day <= ?
+    where day >= :start
+      and day <= :end
     """,
-    params=(period_start.isoformat(), period_end.isoformat()),
+    params={"start": period_start, "end": period_end},
 ).iloc[0]
+
 
 as_of = global_range["max_day"]
 
@@ -205,17 +222,18 @@ summary = query_df(
     """
     select
       count(*) as rows,
-      1 as devices,
+      count(distinct device_gid) as devices,
       count(distinct channel_num) as device_channels,
-      round(sum(kwh), 3) as kwh_total
+      round(sum(kwh)::numeric, 3) as kwh_total
     from usage_daily
-    where device_gid = ?
+    where device_gid = :device_gid
       and channel_num = 0
-      and day >= ?
-      and day <= ?
+      and day >= :start
+      and day <= :end
     """,
-    params=(POLE_BARN_MAIN_GID, period_start.isoformat(), period_end.isoformat()),
+    params={"device_gid": POLE_BARN_MAIN_GID, "start": period_start, "end": period_end},
 ).iloc[0]
+
 
 st.header("Total Farm Power Usage")
 
@@ -235,16 +253,15 @@ def get_device_main_kwh(device_gid: int) -> float:
         """
         select sum(kwh) as kwh
         from usage_daily
-        where device_gid = ?
+        where device_gid = :device_gid
           and channel_num = 0
-          and day >= ?
-          and day <= ?
+          and day >= :start
+          and day <= :end
         """,
-        params=(device_gid, period_start.isoformat(), period_end.isoformat()),
+        params={"device_gid": device_gid, "start": period_start, "end": period_end},
     )
     v = df["kwh"].iloc[0]
     return float(v) if v is not None else 0.0
-
 
 def get_device_total_kwh_pref_main(device_gid: int) -> float:
     df = query_df(
@@ -253,11 +270,11 @@ def get_device_total_kwh_pref_main(device_gid: int) -> float:
           sum(case when channel_num = 0 then kwh else 0 end) as kwh_main,
           sum(case when channel_num != 0 then kwh else 0 end) as kwh_sub
         from usage_daily
-        where device_gid = ?
-          and day >= ?
-          and day <= ?
+        where device_gid = :device_gid
+          and day >= :start
+          and day <= :end
         """,
-        params=(device_gid, period_start.isoformat(), period_end.isoformat()),
+        params={"device_gid": device_gid, "start": period_start, "end": period_end},
     ).iloc[0]
 
     main = float(df["kwh_main"] or 0.0)
@@ -265,35 +282,38 @@ def get_device_total_kwh_pref_main(device_gid: int) -> float:
     return main if main > 0 else sub
 
 
-
 def get_channel_kwh(device_gid: int, channel_name: str) -> float:
     df = query_df(
         """
         select sum(kwh) as kwh
         from usage_daily
-        where device_gid = ?
-          and day >= ?
-          and day <= ?
-          and lower(trim(coalesce(channel_name,''))) = lower(trim(?))
+        where device_gid = :device_gid
+          and day >= :start
+          and day <= :end
+          and lower(trim(coalesce(channel_name,''))) = lower(trim(:channel_name))
         """,
-        params=(device_gid, period_start.isoformat(), period_end.isoformat(), channel_name),
+        params={
+            "device_gid": device_gid,
+            "start": period_start,
+            "end": period_end,
+            "channel_name": channel_name,
+        },
     )
     v = df["kwh"].iloc[0]
     return float(v) if v is not None else 0.0
 
+
 def billing_ym_expr(billing_day: int = BILLING_DAY) -> str:
-    # Labels each row with Emporia-style billing month (YYYY-MM)
-    # If day-of-month >= billing_day => counts toward next month label
     return f"""
     case
-      when cast(strftime('%d', day) as integer) >= {billing_day}
-      then strftime('%Y-%m', date(day, '+1 month'))
-      else strftime('%Y-%m', day)
+      when extract(day from day) >= {billing_day}
+      then to_char(day + interval '1 month', 'YYYY-MM')
+      else to_char(day, 'YYYY-MM')
     end
     """
 
+
 def monthly_channel_kwh(device_gid: int, channel_name: str, months: list[str]) -> pd.DataFrame:
-    placeholders = ",".join(["?"] * len(months))
     ym_expr = billing_ym_expr()
 
     df = query_df(
@@ -302,12 +322,12 @@ def monthly_channel_kwh(device_gid: int, channel_name: str, months: list[str]) -
           {ym_expr} as ym,
           sum(kwh) as kwh
         from usage_daily
-        where device_gid = ?
-          and lower(trim(coalesce(channel_name,''))) = lower(trim(?))
-          and {ym_expr} in ({placeholders})
+        where device_gid = :device_gid
+          and lower(trim(coalesce(channel_name,''))) = lower(trim(:channel_name))
+          and {ym_expr} = any(:months)
         group by ym
         """,
-        params=(device_gid, channel_name, *months),
+        params={"device_gid": device_gid, "channel_name": channel_name, "months": months},
     )
 
     base = pd.DataFrame({"ym": months})
@@ -316,7 +336,6 @@ def monthly_channel_kwh(device_gid: int, channel_name: str, months: list[str]) -
     return out
 
 def monthly_device_total_pref_main(device_gid: int, months: list[str]) -> pd.DataFrame:
-    placeholders = ",".join(["?"] * len(months))
     ym_expr = billing_ym_expr()
 
     df = query_df(
@@ -326,11 +345,11 @@ def monthly_device_total_pref_main(device_gid: int, months: list[str]) -> pd.Dat
           sum(case when channel_num = 0 then kwh else 0 end) as kwh_main,
           sum(case when channel_num != 0 then kwh else 0 end) as kwh_sub
         from usage_daily
-        where device_gid = ?
-          and {ym_expr} in ({placeholders})
+        where device_gid = :device_gid
+          and {ym_expr} = any(:months)
         group by ym
         """,
-        params=(device_gid, *months),
+        params={"device_gid": device_gid, "months": months},
     )
 
     base = pd.DataFrame({"ym": months})
@@ -340,8 +359,8 @@ def monthly_device_total_pref_main(device_gid: int, months: list[str]) -> pd.Dat
     out["kwh"] = out.apply(lambda r: r["kwh_main"] if r["kwh_main"] > 0 else r["kwh_sub"], axis=1)
     return out[["ym", "kwh"]]
 
+
 def monthly_device_main_kwh(device_gid: int, months: list[str]) -> pd.DataFrame:
-    placeholders = ",".join(["?"] * len(months))
     ym_expr = billing_ym_expr()
 
     df = query_df(
@@ -350,17 +369,18 @@ def monthly_device_main_kwh(device_gid: int, months: list[str]) -> pd.DataFrame:
           {ym_expr} as ym,
           sum(case when channel_num = 0 then kwh else 0 end) as kwh
         from usage_daily
-        where device_gid = ?
-          and {ym_expr} in ({placeholders})
+        where device_gid = :device_gid
+          and {ym_expr} = any(:months)
         group by ym
         """,
-        params=(device_gid, *months),
+        params={"device_gid": device_gid, "months": months},
     )
 
     base = pd.DataFrame({"ym": months})
     out = base.merge(df, on="ym", how="left").fillna({"kwh": 0.0})
     out["kwh"] = out["kwh"].astype(float)
     return out
+
 
 def monthly_device_total_for_chart(device_gid: int, months: list[str]) -> pd.DataFrame:
     """
@@ -528,36 +548,37 @@ st.divider()
 # -------- Per-device totals and per-channel tables --------
 st.header("All Power Usage")
 
-placeholders = ",".join(["?"] * len(FEATURED_GIDS))
+#used w/ sqlite
+#placeholders = ",".join(["?"] * len(FEATURED_GIDS))
 
 device_totals = query_df(
-    f"""
+    """
     select
       device_gid,
-
-      round(sum(case when channel_num = 0 then kwh else 0 end), 3) as kwh_main,
-      round(sum(case when channel_num != 0 then kwh else 0 end), 3) as kwh_sub,
-
+      round(sum(case when channel_num = 0 then kwh else 0 end)::numeric, 3) as kwh_main,
+      round(sum(case when channel_num != 0 then kwh else 0 end)::numeric, 3) as kwh_sub,
       round(
-        case
-          when sum(case when channel_num = 0 then kwh else 0 end) > 0
-          then sum(case when channel_num = 0 then kwh else 0 end)
-          else sum(case when channel_num != 0 then kwh else 0 end)
-        end
+        (
+          case
+            when sum(case when channel_num = 0 then kwh else 0 end) > 0
+            then sum(case when channel_num = 0 then kwh else 0 end)
+            else sum(case when channel_num != 0 then kwh else 0 end)
+          end
+        )::numeric
       , 3) as kwh_device,
-
       count(distinct case when channel_num != 0 then channel_num end) as channels,
       min(day) as start_day,
       max(day) as end_day
     from usage_daily
-    where day >= ?
-      and day <= ?
-      and device_gid in ({placeholders})
+    where day >= :start
+      and day <= :end
+      and device_gid = any(:gids)
     group by device_gid
-    order by kwh_device desc
+    order by device_gid
     """,
-    params=(period_start.isoformat(), period_end.isoformat(), *FEATURED_GIDS),
+    params={"start": period_start, "end": period_end, "gids": FEATURED_GIDS},
 )
+
 
 # Reorder
 device_totals["__order"] = device_totals["device_gid"].apply(
@@ -585,7 +606,7 @@ def render_device_section(device_gid: int):
     st.subheader(device_name)
     st.metric("Device kWh", f"{float(drow['kwh_device'] or 0.0):,.2f}")
 
-        # ---- Monthly totals chart (last 12 billing months) ----
+    # ---- Monthly totals chart (last 12 billing months) ----
     months_for_device_chart = raw_months[:12]
     months_for_device_chart = list(reversed(months_for_device_chart))  # oldest -> newest
 
@@ -635,20 +656,21 @@ def render_device_section(device_gid: int):
         channels_df = query_df(
             """
             select
-              channel_num,
-              coalesce(nullif(trim(channel_name), ''), 'Unnamed') as channel_name,
-              round(sum(kwh), 3) as kwh
+            channel_num,
+            coalesce(nullif(trim(channel_name), ''), 'Unnamed') as channel_name,
+            round(sum(kwh)::numeric, 3) as kwh
             from usage_daily
-            where device_gid = ?
-              and day >= ?
-              and day <= ?
-              and channel_num != 0
+            where device_gid = :device_gid
+            and day >= :start
+            and day <= :end
+            and channel_num != 0
             group by channel_num, channel_name
-            having kwh is not null
+            having sum(kwh) is not null
             order by kwh desc
             """,
-            params=(int(device_gid), period_start.isoformat(), period_end.isoformat()),
+            params={"device_gid": int(device_gid), "start": period_start, "end": period_end},
         )
+
     except Exception as e:
         st.error(f"Channel query failed for {device_name}: {e}")
         return
@@ -660,34 +682,29 @@ def render_device_section(device_gid: int):
     with st.expander("Channel details", expanded=False):
         st.dataframe(channels_df, use_container_width=True, hide_index=True)
 
-
     channels_df = query_df(
         """
         select
         channel_num,
         coalesce(nullif(trim(channel_name), ''), 'Unnamed') as channel_name,
-        round(sum(kwh), 3) as kwh
+        round(sum(kwh)::numeric, 3) as kwh
         from usage_daily
-        where device_gid = ?
-        and day >= ?
-        and day <= ?
+        where device_gid = :device_gid
+        and day >= :start
+        and day <= :end
         and channel_num != 0
         group by channel_num, channel_name
-        having kwh is not null
+        having sum(kwh) is not null
         order by kwh desc
         """,
-        params=(int(device_gid), period_start.isoformat(), period_end.isoformat()),
+        params={"device_gid": int(device_gid), "start": period_start, "end": period_end},
     )
+
 
     channels_df = channels_df[channels_df["channel_name"] != "Unnamed"].copy()
     channels_df = channels_df.rename(columns={"channel_name": "Channel", "kwh": "kWh (billing period)"})
     channels_df = channels_df[["Channel", "kWh (billing period)"]]
 
-
-RV_SITES = 417380
-GROW_BARN = 432079
-POLE_BARN_MAIN = 422491
-POLE_BARN_SUB = 432058
 
 # Row 1: RV Sites | Grow Barn
 col_left, col_right = st.columns(2)
