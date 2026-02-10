@@ -79,7 +79,7 @@ def query_df(sql: str, params: tuple = ()) -> pd.DataFrame:
 def first_of_month(d: dt.date) -> dt.date:
     return dt.date(d.year, d.month, 1)
 
-BILLING_DAY = 27  # Emporia billing cycle day
+BILLING_DAY = 23  # Emporia billing cycle day
 
 def last_day_of_month(d: dt.date) -> int:
     next_month = (d.replace(day=28) + dt.timedelta(days=4)).replace(day=1)
@@ -92,7 +92,7 @@ def clamp_day(year: int, month: int, day: int) -> dt.date:
 def billing_period_for_ym(billing_ym: str, billing_day: int = BILLING_DAY) -> tuple[dt.date, dt.date]:
     """
     billing_ym is the Emporia "billing month" label in YYYY-MM.
-    For billing_day=27: billing_ym=2026-01 means 2025-12-27 .. 2026-01-26
+    For billing_day=23: billing_ym=2026-01 means 2025-12-23 .. 2026-01-22
     """
     y, m = map(int, billing_ym.split("-"))
     period_start = dt.date(y, m, 1)
